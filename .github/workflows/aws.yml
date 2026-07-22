@@ -15,23 +15,24 @@ jobs:
   terraform:
     name: Terraform + Docker
     runs-on: ubuntu-latest
+    environment: aws
 
     permissions:
       contents: read
-      id-token: write
       pull-requests: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Autentizace přes GitHub OIDC - žádné dlouhodobé AWS klíče v secrets.
-      # AWS_ROLE_ARN je output "github_actions_role_arn" z terraformu, nastavený
-      # jako repository variable (Settings -> Secrets and variables -> Actions -> Variables).
-      - name: Configure AWS credentials via OIDC
+      # Staticke AWS klice ulozene jako secrets v GitHub Environmentu "aws".
+      # Terraform v ramci "full apply" kroku nize sam vytvori i OIDC
+      # provider/roli pro GitHub Actions - zadny lokalni bootstrap neni potreba.
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
@@ -95,11 +96,11 @@ jobs:
       # Krok 1 (bonus - infrastruktura): vytvoříme jen ECR registry pomocí -target,
       # aby existoval dřív, než do něj budeme pushovat image.
       - name: Terraform Apply - ECR only (-target)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: terraform apply -auto-approve -input=false -target=aws_ecr_repository.app
 
       - name: Get ECR repository URL
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         id: ecr
         run: |
           REPO_URL=$(terraform output -raw ecr_repository_url)
@@ -107,7 +108,7 @@ jobs:
 
       # Krok 2 (základní úkol): build docker image z nginx a publikace do ECR.
       - name: Build and push Docker image to ECR
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           REPO_URL="${{ steps.ecr.outputs.repo_url }}"
           aws ecr get-login-password --region ${{ env.AWS_REGION }} \
@@ -121,11 +122,11 @@ jobs:
       # task definition a service. Task definition ukazuje na image, který jsme
       # právě pushli (tag = commit SHA), ne na public docker hub.
       - name: Terraform Apply - full infrastructure
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: terraform apply -auto-approve -input=false -var="image_tag=${{ github.sha }}"
 
       - name: Get Load Balancer URL
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         id: lb_url
         run: |
           LB_URL=$(terraform output -raw load_balancer_url)
@@ -133,7 +134,7 @@ jobs:
           echo "Load Balancer URL: $LB_URL"
 
       - name: Test Application
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         run: |
           URL="${{ steps.lb_url.outputs.url }}"
           echo "Waiting for ECS service to stabilize..."
